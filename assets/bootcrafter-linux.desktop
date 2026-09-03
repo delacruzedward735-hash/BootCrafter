@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=BootCrafter Linux
+GenericName=Bootable USB Creator
+Comment=Create and verify bootable USB drives safely
+Exec=bootcrafter-linux
+Icon=bootcrafter-linux
+Terminal=false
+Categories=System;Utility;
+Keywords=USB;ISO;bootable;flash;image;Windows;Linux;
+StartupNotify=true
+StartupWMClass=Bootcrafterlinux
