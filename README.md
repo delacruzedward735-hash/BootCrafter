@@ -2,6 +2,8 @@
 
 BootCrafter Linux is a Linux-native bootable USB creator focused on safe, reliable disk writing rather than cosmetic complexity.
 
+BootCrafter is an independent project and is not affiliated with, endorsed by, or sponsored by Rufus or its maintainers.
+
 ## Functional features
 
 - Detects removable/external USB and MMC drives with `lsblk`.
@@ -89,4 +91,8 @@ Automated tests can validate the write/verify pipeline against files and the GUI
 
 ## License
 
-GNU GPL version 3. See `LICENSE`.
+BootCrafter-authored code is licensed under the **MIT License**. See `LICENSE`.
+
+Copyright (c) 2026 CodeDev by Edward.
+
+External programs and separately identified third-party components remain under their own licenses; the BootCrafter MIT License does not relicense them.
