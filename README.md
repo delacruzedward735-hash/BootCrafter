@@ -1,77 +1,137 @@
-# BootCrafter Linux 1.0.3
+# BootCrafter Linux 1.0.5
 
-BootCrafter Linux is a Linux-native bootable USB creator focused on safe, reliable disk writing rather than cosmetic complexity.
+BootCrafter Linux is a Linux-native bootable USB creator focused on safe, verifiable disk writing. Version 1.0.5 is the production-hardening release of the 1.0.x line.
 
 BootCrafter is an independent project and is not affiliated with, endorsed by, or sponsored by Rufus or its maintainers.
 
-## Functional features
+## Supported workflows
 
-- Detects removable/external USB and MMC drives with `lsblk`.
-- Never auto-selects a destructive target. If a selected USB disappears, BootCrafter clears the selection instead of silently switching to another drive.
-- Blocks disks participating in the running system, including common system/data mount points, live-media mounts, active swap, and read-only disks. Normal removable mounts under `/media`, `/run/media`, and `/mnt` can be safely unmounted for writing.
-- Captures a path-bound device identity token using model/vendor/size plus serial, WWN and kernel major:minor data when available, then rechecks it inside the privileged helper before erasing.
-- Warns when a USB does not expose a serial/WWN so the model, size and `/dev` path can be checked carefully.
-- Writes `.iso`, `.img`, `.raw`, `.bin`, `.gz`, `.xz`, `.bz2`, single-image `.zip`, and optional `.zst/.zstd` images.
-- Refuses raw images that exceed the target; compressed images are bounded while decompressing.
-- Reads the first image chunk successfully before changing the target.
-- Opens raw block targets exclusively after unmounting to reduce remount/in-use races.
-- Clears stale end-of-disk metadata before raw writing so an old backup GPT header does not confuse the newly written image.
-- Refuses to erase a USB drive that contains the selected source image.
-- Optional full byte-for-byte post-write verification using SHA-256 after `fsync` and block-buffer flushing.
-- Calculates standalone SHA-256 checksums.
-- Windows 10/11 UEFI installer mode:
-  - validates UEFI boot files and `sources/boot.wim` **before erasing the USB**;
-  - checks that the target has enough capacity **before erasing it**;
-  - creates an active MBR FAT32 installer partition with a compatible partition type;
-  - splits oversized `sources/install.wim` with `wimlib-imagex` when needed;
-  - checks essential boot files after copying;
-  - re-unmounts after filesystem creation to avoid desktop automounter races.
-- Format/recovery mode with GPT/MBR and FAT32, exFAT, NTFS, or ext4.
-- Format mode resolves the required filesystem formatter before any destructive change.
-- Uses compatible MBR/GPT partition type identifiers for the selected filesystem.
-- Automatic target unmounting and partition-table reread/udev settling.
-- GUI runs unprivileged; destructive work is delegated through `pkexec` to a small helper.
-- All operation-changing controls are locked while a privileged disk operation is running.
-- Custom BootCrafter launcher/window icon included in the Debian package.
-- Compact light desktop UI inspired by familiar Windows USB-writer workflows, with Drive Properties, Format Options, Status, and a permanently visible START/CLOSE footer.
-- Mode-aware controls: raw images expose their image-defined layout as read-only, Windows mode exposes only settings the backend actually applies, and format-only mode enables the real partition/filesystem/label controls.
-- Advanced safety information and the activity log stay collapsed until requested, keeping the main workflow compact.
-- Responsive GUI with a fixed bottom action bar, so START/CLOSE stay visible on smaller/high-DPI desktops.
+- **Linux / Proxmox / hybrid ISO and raw images** — byte-for-byte whole-device writing.
+- **Compressed disk images** — `.gz`, `.xz`, `.bz2`, single-image `.zip`, and optional `.zst/.zstd`.
+- **Windows 10/11 UEFI installer media** — FAT32 installer USB with automatic `install.wim` splitting when `wimlib-imagex` is available.
+- **USB recovery / format mode** — GPT or MBR with FAT32, exFAT, NTFS, or ext4.
+- **SHA-256 verification** — optional full post-write read-back verification for raw-image mode plus standalone image checksum calculation.
 
-## Install on Debian / Ubuntu / Mint / Zorin
+## Production safety design
 
-Build and install:
+BootCrafter deliberately separates the desktop GUI from privileged disk operations.
+
+- The GUI is expected to run as a normal desktop user and refuses normal root-GUI startup.
+- Destructive operations are delegated to the installed root-owned helper through PolicyKit/`pkexec`.
+- The Debian package installs an explicit PolicyKit action for `/usr/lib/bootcrafter-linux/bootcrafter-helper`.
+- The privileged helper starts with a minimal environment and Python isolated mode (`-I -S`), so the current directory, user site-packages, `PATH`, `PYTHONPATH`, and `PYTHONHOME` cannot redirect privileged imports or command execution.
+- Privileged command discovery uses only trusted system directories (`/usr/sbin`, `/usr/bin`, `/sbin`, `/bin`).
+- Source-checkout mode cannot elevate user-writable Python code; install the `.deb` before performing destructive operations.
+- The selected source image is opened as a stable inode snapshot after authorization. The helper does not use administrator privileges to read files that the invoking desktop user could not normally read.
+- The helper keeps working if the GUI or its progress pipe disappears during a write; a desktop crash does not intentionally abort the root writer midway.
+
+## Device protection
+
+- BootCrafter never automatically chooses a destructive target.
+- A selected drive that disappears is cleared rather than silently replaced.
+- System/live/swap/read-only disks are filtered out; internal non-removable/non-hotplug eMMC devices are not offered merely because their transport is `mmc`.
+- Mounted system/data locations such as `/`, `/boot`, `/boot/efi`, `/home`, `/var`, `/srv`, and similar non-removable mount paths are protected.
+- Normal removable mounts under `/media`, `/run/media`, and `/mnt` can be unmounted for use.
+- Device identity is locked at operation start and rechecked using path, size, vendor/model, transport, serial, WWN, and major:minor data where available, even when the helper is invoked directly without a GUI-supplied identity token.
+- Serial/WWN-less USB drives trigger an additional caution because no software can perfectly distinguish two truly identical serial-less devices that replace one another at the same kernel path.
+- The helper refuses to erase a target that stores the selected source image.
+
+## Raw image reliability
+
+- Checks target capacity before writing.
+- Fully decodes compressed images **before unmounting or erasing the target**, catching late CRC/decompression failures before destructive work begins.
+- Reads raw images successfully before target modification.
+- Claims the raw block target with an exclusive open after unmounting.
+- Revalidates the device immediately before opening and checks the opened device identity/capacity.
+- Clears stale backup-GPT/end-of-disk signatures before the new image is written.
+- Handles short writes explicitly.
+- Calls `fsync` and flushes block buffers when supported.
+- Optional SHA-256 read-back verification revalidates the selected device, binds the verification file descriptor to the same block-device identity/capacity, reads exactly the bytes that were written, and compares them with the write-time digest.
+
+## Windows installer mode
+
+Windows mode is intentionally **UEFI-focused**.
+
+Before erasing the USB, BootCrafter:
+
+1. Opens the selected ISO as a stable source snapshot.
+2. Attaches that exact inode to a read-only loop device.
+3. Mounts the ISO read-only with `nosuid,nodev,noexec`.
+4. Verifies standard UEFI removable-media boot files and `sources/boot.wim`.
+5. Checks required target capacity with filesystem overhead margin.
+6. Checks for `wimlib-imagex` before erasure when an oversized `install.wim` must be split.
+
+The target is then prepared as an active MBR FAT32 installer USB. Essential boot files are checked after copying. Temporary mount cleanup is strictly non-recursive so a failed emergency unmount cannot cause cleanup code to walk into the mounted USB filesystem.
+
+Windows To Go, UEFI:NTFS, TPM/Secure Boot bypass customization, and legacy-BIOS repair modes are not implemented.
+
+## Format mode
+
+Format/recovery mode supports:
+
+- Partition scheme: GPT or MBR
+- Filesystems: FAT32, exFAT, NTFS, ext4
+- Sanitized volume labels appropriate to each filesystem
+
+Required formatter commands are resolved before destructive partition changes. MBR is conservatively limited to targets up to 2 TiB; use GPT for larger devices.
+
+## Install on Debian / Ubuntu / Linux Mint / Zorin
+
+Install the provided package:
 
 ```bash
-./INSTALL.sh
-sudo apt install ./dist/bootcrafter-linux_1.0.3_all.deb
+cd ~/Downloads
+sudo apt install ./bootcrafter-linux_1.0.5_all.deb
 ```
 
-Or install dependencies for source development:
+Then launch **BootCrafter Linux** from the application menu or run:
 
 ```bash
-sudo apt install python3 python3-tk policykit-1 util-linux fdisk dosfstools e2fsprogs mount coreutils
-sudo apt install wimtools exfatprogs ntfs-3g zstd   # recommended/optional features
+bootcrafter-linux
+```
+
+Do **not** run the GUI with `sudo`. BootCrafter requests administrator authorization only when the disk helper needs it.
+
+### Package dependencies
+
+Required by the Debian package:
+
+```text
+python3 >= 3.10
+python3-tk
+util-linux
+fdisk
+pkexec
+dosfstools
+e2fsprogs
+mount
+coreutils
+```
+
+Recommended optional packages:
+
+```text
+wimtools     oversized Windows install.wim splitting
+exfatprogs   exFAT format mode
+ntfs-3g      NTFS format mode
+zstd         .zst/.zstd raw images
+```
+
+## Source development
+
+```bash
+./scripts/verify.sh
 ./scripts/run-dev.sh
 ```
 
-`wimtools` is only required when a Windows ISO contains an `install.wim` that is too large for FAT32. `exfatprogs`, `ntfs-3g`, and `zstd` are only required for their matching optional modes.
+For security, a source checkout may run the UI and checksum features but does not elevate its user-writable Python helper. Build and install the package before testing destructive USB operations:
 
-## Modes
+```bash
+./INSTALL.sh
+sudo apt install ./dist/bootcrafter-linux_1.0.5_all.deb
+```
 
-### Raw image mode
-
-Use this for hybrid Linux ISOs, Proxmox installers, disk images, and similar media. The image is copied byte-for-byte to the whole selected device. Partition scheme, target system, filesystem, and volume-label fields remain visible for context but are read-only/disabled because the source image already contains its own layout.
-
-### Windows installer ISO (UEFI)
-
-Use this for modern Windows 10/11 installer ISOs. BootCrafter validates the ISO and target capacity first, formats the target as FAT32, copies the installer files, and splits an oversized `install.wim` when required. This is UEFI-focused; Windows To Go and special legacy-BIOS repair modes are not implemented.
-
-### Format only
-
-Use this to restore/repartition a USB drive after using it as boot media.
-
-## Verification
+## Verification and production audit
 
 Run:
 
@@ -79,20 +139,22 @@ Run:
 ./scripts/verify.sh
 ```
 
-The verification suite performs Python compilation, backend unit tests, helper CLI checks, runtime import/version checks, GUI layout and destructive-target-selection smoke tests under Xvfb when available, and dependency-free PNG asset validation.
+The 1.0.5 release audit covers Python compilation, **32 backend/security tests**, helper CLI parsing, GUI layout and destructive-target safety under Xvfb, trusted command resolution, root-GUI refusal, broken-progress-pipe resilience, PolicyKit policy validation, isolated-Python import-hijack regression tests, package ownership/permission checks, launcher/icon validation, and installed-package smoke testing. `scripts/audit-package.sh` independently audits the built `.deb`.
 
-The release package is additionally extracted and tested using its installed paths before publishing.
+See `AUDIT-REPORT.md` for the release-specific audit record.
 
-## Safety note
+## Hardware acceptance note
 
-Disk-writing tools are inherently destructive. BootCrafter includes multiple independent checks, but always confirm the shown device model, size, and `/dev` path before approving the operation. USB devices that do not expose serial/WWN identifiers receive an extra warning because software cannot perfectly distinguish two truly identical serial-less devices that replace each other at the same kernel path.
+Disk-writing tools are inherently destructive. The software and package can be audited extensively without real hardware, but automated file-backed tests cannot prove that every USB controller, firmware, UEFI implementation, or physical machine will boot correctly. Before broad public distribution, perform at least one real **ISO → USB → read-back verification → boot** acceptance test on each workflow you intend to advertise (for example Proxmox/Linux raw mode and Windows UEFI mode).
 
-Automated tests can validate the write/verify pipeline against files and the GUI/package structure, but this build environment does not expose a writable physical USB block device. A real USB write-and-boot test remains the final hardware acceptance test.
+## Project links
+
+- Website: https://bootcrafter-linux.vercel.app
+- Source: https://github.com/delacruzedward735-hash/BootCrafter
+- Releases: https://github.com/delacruzedward735-hash/BootCrafter/releases
+
+The product website is intentionally maintained separately from this application-source repository.
 
 ## License
 
-BootCrafter-authored code is licensed under the **MIT License**. See `LICENSE`.
-
-Copyright (c) 2026 CodeDev by Edward.
-
-External programs and separately identified third-party components remain under their own licenses; the BootCrafter MIT License does not relicense them.
+BootCrafter-authored code is licensed under the **MIT License**. See `LICENSE`. External programs invoked by BootCrafter remain under their respective licenses; see `NOTICE.md`.
