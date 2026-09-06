@@ -1,0 +1,115 @@
+
++                progress("stage", name="flushing", message="Flushing data to the USB drive")
++                os.fsync(fd)
++            finally:
++                os.close(fd)
++
++        digest = hasher.hexdigest()
++        progress("checksum", algorithm="sha256", value=digest, bytes=written)
++        # The writer FD is closed at this point. Re-lock the path to the exact
++        # selected device before any read-back or partition-table notification.
++        target_info = validate_target_device(target, operation_identity)
++        _flush_target(target)
++
++        if verify:
++            progress("stage", name="verifying", message="Verifying written data from the USB drive")
++            target_info = validate_target_device(target, operation_identity)
++            verify_hasher = hashlib.sha256()
++            checked = 0
++            start = time.monotonic()
++            verify_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
++            verify_fd = os.open(target, verify_flags)
++            try:
++                _assert_open_target_matches_path(verify_fd, target, target_info.size)
++                with os.fdopen(verify_fd, "rb", buffering=0, closefd=False) as dst:
++                    remaining = written
++                    while remaining:
++                        chunk = dst.read(min(CHUNK_SIZE, remaining))
++                        if not chunk:
++                            raise OSError("Unexpected end of target while verifying.")
++                        verify_hasher.update(chunk)
++                        checked += len(chunk)
++                        remaining -= len(chunk)
++                        elapsed = max(time.monotonic() - start, 0.001)
++                        progress(
++                            "progress",
++                            stage="verifying",
++                            bytes=checked,
++                            total=written,
++                            speed=int(checked / elapsed),
++                        )
++            finally:
++                os.close(verify_fd)
++            if verify_hasher.hexdigest() != digest:
++                raise RuntimeError("Verification failed: target data does not match the image.")
++            progress("verified", algorithm="sha256", value=digest)
++
++    validate_target_device(target, operation_identity)
+     _reread_partitions(target)
+     progress("done", bytes=written, sha256=digest)
+ 
+@@ -550,8 +831,11 @@ def format_drive(
+     target = os.path.realpath(device)
+     _check_block_device(target)
+     info = validate_target_device(target, expected_identity)
++    operation_identity = _operation_identity(info, expected_identity)
+     if info.size < 32 * 1024 * 1024:
+         raise ValueError("Drive is too small to format safely.")
++    if scheme.lower() == "mbr" and info.size > MBR_MAX_SAFE_BYTES:
++        raise ValueError("MBR formatting is limited to drives up to 2 TiB. Select GPT for this drive.")
+ 
+     fs = filesystem.lower()
+     script = partition_script(scheme, fs)
+@@ -561,7 +845,7 @@ def format_drive(
+     formatter, _ = _filesystem_formatter(fs)
+ 
+     unmount_device(target, progress)
+-    validate_target_device(target, expected_identity)
++    validate_target_device(target, operation_identity)
+ 
+     progress("stage", name="partitioning", message="Creating partition table")
+     _run([wipefs, "--all", "--force", target])
+@@ -572,7 +856,7 @@ def format_drive(
+     # A new partition can expose a stale old filesystem signature and trigger
+     # desktop automount before mkfs. Unmount once more immediately beforehand.
+     unmount_device(target, progress)
+-    validate_target_device(target, expected_identity)
++    validate_target_device(target, operation_identity)
+ 
+     clean_label = sanitize_label(label, fs)
+     progress("stage", name="formatting", message=f"Formatting {fs.upper()}")
+@@ -709,33 +993,50 @@ def make_windows_usb(
+ ) -> None:
+     """Create modern Windows 10/11 UEFI install media on FAT32."""
+     require_root()
+-    source = _validate_source_file(image)
+-    if not source.lower().endswith(".iso"):
+-        raise ValueError("Windows installer mode requires an ISO image.")
+     target = os.path.realpath(device)
+     _check_block_device(target)
+-    target_info = validate_target_device(target, expected_identity)
+-    ensure_source_not_on_target(source, target)
+ 
+-    # Resolve all always-required tools before any destructive operation.
+-    wipefs = require_command("wipefs")
+-    sfdisk = require_command("sfdisk")
+-    mkfs = require_command("mkfs.vfat")
+-    mount = require_command("mount")
+-    umount = require_command("umount")
+-    sync_cmd = require_command("sync")
+-
+-    with tempfile.TemporaryDirectory(prefix="bootcrafter-") as temp:
++    with open_source_snapshot(image) as snapshot:
++        if not snapshot.path.lower().endswith(".iso"):
++            raise ValueError("Windows installer mode requires an ISO image.")
++        target_info = validate_target_device(target, expected_identity)
++        operation_identity = _operation_identity(target_info, expected_identity)
++        if target_info.size > MBR_MAX_SAFE_BYTES:
++            raise ValueError("Windows installer mode currently supports MBR USB targets up to 2 TiB.")
++        ensure_source_not_on_target(snapshot.proc_path, target)
++
++        # Resolve all required tools before any destructive operation.
++        wipefs = require_command("wipefs")
++        sfdisk = require_command("sfdisk")
++        mkfs = require_command("mkfs.vfat")
++        mou
