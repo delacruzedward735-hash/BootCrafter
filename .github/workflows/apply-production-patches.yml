@@ -1,0 +1,67 @@
+name: Apply production source patches
+
+on:
+  push:
+    branches:
+      - release/1.0.5-production
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    name: Apply audited 1.0.5 source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out release branch
+        uses: actions/checkout@v4
+        with:
+          ref: release/1.0.5-production
+          fetch-depth: 0
+
+      - name: Reassemble and validate patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat patches/05-operations.part* > /tmp/05-operations.patch
+          cat patches/06-testdevices.part* > /tmp/06-testdevices.patch
+          cat patches/07-testoperations.part* > /tmp/07-testoperations.patch
+          cat patches/08-audit.part* > /tmp/08-audit.patch
+          git apply --check \
+            patches/01-version.patch \
+            patches/02-app.patch \
+            patches/03-devices.patch \
+            patches/04-changelog.patch \
+            /tmp/05-operations.patch \
+            /tmp/06-testdevices.patch \
+            /tmp/07-testoperations.patch \
+            /tmp/08-audit.patch
+
+      - name: Apply audited source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply \
+            patches/01-version.patch \
+            patches/02-app.patch \
+            patches/03-devices.patch \
+            patches/04-changelog.patch \
+            /tmp/05-operations.patch \
+            /tmp/06-testdevices.patch \
+            /tmp/07-testoperations.patch \
+            /tmp/08-audit.patch
+          chmod +x scripts/audit-package.sh
+          rm -rf patches
+          rm -f .github/workflows/apply-production-patches.yml
+
+      - name: Commit production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "release: apply audited BootCrafter Linux 1.0.5 source"
+          git push origin HEAD:release/1.0.5-production
