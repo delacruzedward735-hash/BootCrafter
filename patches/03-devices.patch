@@ -1,0 +1,44 @@
+diff --git a/bootcrafter_linux/devices.py b/bootcrafter_linux/devices.py
+index da273df..947d5ca 100644
+--- a/bootcrafter_linux/devices.py
++++ b/bootcrafter_linux/devices.py
+@@ -7,6 +7,8 @@ import subprocess
+ from dataclasses import dataclass
+ from typing import Any, Iterable
+ 
++TRUSTED_COMMAND_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
++
+ # Mounts used by the running OS must never be treated as disposable media.
+ # Common removable-media mount locations are allowed and can be unmounted by
+ # the privileged helper before writing.
+@@ -136,7 +138,7 @@ def parse_lsblk(payload: str, include_internal: bool = False) -> list[Device]:
+         hotplug = _bool(node.get("hotplug"))
+         read_only = _bool(node.get("ro"))
+         protected = _has_protected_mount(node)
+-        external_candidate = removable or hotplug or transport in {"usb", "mmc", "sdio"}
++        external_candidate = removable or hotplug or transport == "usb"
+         if (not include_internal and not external_candidate) or protected or read_only:
+             continue
+         devices.append(
+@@ -158,10 +160,20 @@ def parse_lsblk(payload: str, include_internal: bool = False) -> list[Device]:
+     return sorted(devices, key=lambda d: d.path)
+ 
+ 
++def _trusted_system_command(name: str) -> str:
++    if not name or "/" in name:
++        raise RuntimeError(f"Invalid system command name: {name!r}")
++    for directory in TRUSTED_COMMAND_DIRS:
++        candidate = os.path.join(directory, name)
++        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
++            return candidate
++    raise RuntimeError(f"Required system command not found: {name}")
++
++
+ def lsblk_json() -> str:
+     fields = "NAME,PATH,TYPE,SIZE,MODEL,VENDOR,TRAN,RM,HOTPLUG,MOUNTPOINTS,FSTYPE,LABEL,RO,SERIAL,WWN,MAJ:MIN"
+     result = subprocess.run(
+-        ["lsblk", "--json", "--bytes", "--paths", "--output", fields],
++        [_trusted_system_command("lsblk"), "--json", "--bytes", "--paths", "--output", fields],
+         check=True,
+         stdout=subprocess.PIPE,
+         stderr=subprocess.PIPE,
