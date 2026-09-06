@@ -1,0 +1,34 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 62c67c9..90b0327 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,29 @@
+ # Changelog
+ 
++## 1.0.5 — independent production audit fixes
++
++- Fixed a release-blocking privileged Python import-hijack risk found during an independent audit of 1.0.4. Installed GUI/helper wrappers now use Python isolated mode (`-I -S`) and explicit root-owned package paths, preventing current-working-directory and user-site module shadowing after PolicyKit authorization.
++- Switched the Debian dependency from the legacy/transitional `policykit-1` name to `pkexec`, matching modern Debian/Ubuntu packaging.
++- Added operation-local device identity locking even when the helper CLI is invoked without a GUI-supplied `--identity` token; every destructive stage now follows the initially validated device.
++- Hardened raw read-back verification by revalidating after the write, checking the opened verification file descriptor against the selected block-device identity/capacity, and revalidating again before final partition-table reread.
++- Internal eMMC/SDIO-style storage is no longer listed solely because of transport type; eligible destructive targets must be removable, hotplug, or USB.
++- Removed the hidden root-GUI bypass so the desktop interface always refuses direct root execution.
++- Debian maintainer scripts now set a fixed safe system `PATH` before calling system tools.
++- Added `scripts/audit-package.sh`, including extracted-package metadata/permissions checks and an executable malicious-current-directory Python import-hijack regression.
++- Expanded backend/security regression coverage from 30 to **32 tests**.
++- Revalidated the installed-layout GUI/helper with isolated Python and the final PolicyKit action.
++
++## 1.0.4 — production hardening
++
++- Restricted privileged command resolution to trusted system directories; user/session `PATH` is not used by root disk operations.
++- Added a dedicated PolicyKit action and minimal privileged environment.
++- Disabled privileged destructive operations from user-writable source checkouts.
++- Added stable source-image inode snapshots and invoking-user readability enforcement.
++- Fully validates compressed images before target unmount/erase.
++- Added read-only loop mounting for Windows ISO source snapshots and non-recursive mount cleanup.
++- Made helper progress output resilient to GUI/pipe disappearance.
++- Added conservative MBR >2 TiB rejection and increased Windows capacity margin.
++
+ ## 1.0.3 — compact Windows-style workflow UI
+ 
+ - Rebuilt the main Tkinter interface into a compact light utility layout with Drive Properties, Format Options, and Status sections.
