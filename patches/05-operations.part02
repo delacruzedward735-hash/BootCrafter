@@ -1,0 +1,130 @@
+ourceSnapshot, target_size: int, progress: Progress = emit
++) -> tuple[int | None, str]:
++    """Fully decode compressed sources before the target is unmounted/erased."""
++    stream, known_size, compression = _snapshot_image_stream(snapshot)
++    if compression == "raw":
++        stream.close()
++        return known_size, compression
++    progress("stage", name="validating", message=f"Validating {compression} image before erasing the USB")
++    total = 0
++    with stream:
++        while True:
++            chunk = stream.read(CHUNK_SIZE)
++            if not chunk:
++                break
++            total += len(chunk)
++            if total > target_size:
++                raise ValueError("Decompressed image is larger than the selected drive.")
++            progress("progress", stage="validating", bytes=total, total=known_size, speed=0)
++    if total <= 0:
++        raise ValueError("The selected image produced no data.")
++    return total, compression
++
++
+ def image_stream(path: str) -> tuple[BinaryIO | _ZipImageStream | _ProcessImageStream, int | None, str]:
+     p = Path(path)
+     lower = p.name.lower()
+@@ -328,6 +566,16 @@ def _assert_open_target_matches_path(fd: int, target: str, expected_size: int) -
+         raise RuntimeError("Target drive capacity changed while opening it. Refresh and select the USB again.")
+ 
+ 
++def _operation_identity(info, expected_identity: str | None) -> str:
++    """Lock all later stages to the device observed at operation start.
++
++    The GUI normally supplies an identity token, but the privileged helper can
++    also be invoked directly. Never let an omitted token disable replacement
++    detection between unmount/partition/write stages.
++    """
++    return expected_identity or info.identity_token
++
++
+ def write_image(
+     image: str,
+     device: str,
+@@ -336,112 +584,145 @@ def write_image(
+     progress: Progress = emit,
+ ) -> None:
+     require_root()
+-    source = _validate_source_file(image)
+     target = os.path.realpath(device)
+     _check_block_device(target)
+-    target_info = validate_target_device(target, expected_identity)
+-    if target_info.size < 32 * 1024 * 1024:
+-        raise ValueError("Drive is too small to write safely.")
+-    ensure_source_not_on_target(source, target)
+-    unmount_device(target, progress)
+-    # Revalidate after unmount in case the device disappeared/reappeared.
+-    target_info = validate_target_device(target, expected_identity)
+ 
+-    src, known_size, compression = image_stream(source)
+-    if known_size is not None and known_size > target_info.size:
+-        src.close()
+-        raise ValueError("Image is larger than the selected drive.")
+-
+-    progress("stage", name="writing", message=f"Writing {compression} image")
+-    hasher = hashlib.sha256()
+-    written = 0
+-    start = time.monotonic()
+-
+-    # Read one chunk successfully before changing the target. This catches an
+-    # empty/trivially-corrupt compressed stream before any destructive write.
+-    with src:
+-        first = src.read(CHUNK_SIZE)
+-        if not first:
+-            raise ValueError("The selected image produced no data.")
+-        if len(first) > target_info.size:
+-            raise ValueError("Decompressed image is larger than the selected drive.")
+-
+-        # Re-check identity immediately before claiming the whole block device.
++    with open_source_snapshot(image) as snapshot:
+         target_info = validate_target_device(target, expected_identity)
+-        flags = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_EXCL", 0)
+-        try:
+-            fd = os.open(target, flags)
+-        except OSError as exc:
+-            if getattr(exc, "errno", None) == 16:  # EBUSY
+-                raise RuntimeError(
+-                    "The target became busy after unmounting. Close file-manager/terminal access to the USB and try again."
+-                ) from exc
+-            raise
+-        try:
+-            _assert_open_target_matches_path(fd, target, target_info.size)
+-            # Remove stale backup GPT/signature data at the physical end before
+-            # writing the new image to offset zero.
+-            _clear_stale_target_tail(fd, target_info.size)
+-
+-            pending = first
+-            while True:
+-                if written + len(pending) > target_info.size:
+-                    raise ValueError("Decompressed image is larger than the selected drive.")
+-                view = memoryview(pending)
+-                while view:
+-                    n = os.write(fd, view)
+-                    if n <= 0:
+-                        raise OSError("Short write to target device.")
+-                    view = view[n:]
+-                written += len(pending)
+-                hasher.update(pending)
+-                elapsed = max(time.monotonic() - start, 0.001)
+-                progress(
+-                    "progress",
+-                    stage="writing",
+-                    bytes=written,
+-                    total=known_size,
+-                    speed=int(written / elapsed),
+-                )
+-                pending = src.read(CHUNK_SIZE)
+-                if not pending:
+-                    break
+-
+-            progress("stage", name="flushing", message="Flushing data to the USB drive")
+-            os.fsync(fd)
+-        finally:
+-            os.close(fd)
+-
+-    digest = hasher.hexdigest()
+-    progress("checksum", algorithm="sha256", value=digest, bytes=written)
+-    _flush_target(target)
+-
+-    if verify:
+-        progress("st
