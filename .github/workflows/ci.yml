@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify source and Debian package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3 python3-tk xvfb xauth dpkg-dev
+
+      - name: Verify source
+        run: |
+          chmod +x INSTALL.sh scripts/*.sh
+          ./scripts/verify.sh
+
+      - name: Build Debian package
+        run: ./scripts/build-deb.sh
+
+      - name: Audit Debian package
+        run: ./scripts/audit-package.sh
+
+      - name: Generate checksum
+        run: sha256sum dist/bootcrafter-linux_*_all.deb > dist/SHA256SUMS.txt
+
+      - name: Upload CI package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootcrafter-linux-deb
+          path: |
+            dist/bootcrafter-linux_*_all.deb
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
