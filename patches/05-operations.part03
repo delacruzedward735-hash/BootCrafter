@@ -1,0 +1,111 @@
+age", name="verifying", message="Verifying written data from the USB drive")
+-        verify_hasher = hashlib.sha256()
+-        checked = 0
++        operation_identity = _operation_identity(target_info, expected_identity)
++        if target_info.size < 32 * 1024 * 1024:
++            raise ValueError("Drive is too small to write safely.")
++        ensure_source_not_on_target(snapshot.proc_path, target)
++
++        # Fully validate compressed images before even unmounting the USB. This
++        # catches late CRC/decompression failures that would otherwise leave a
++        # partially overwritten target.
++        known_size, compression = _preflight_compressed_snapshot(snapshot, target_info.size, progress)
++        if known_size is not None and known_size > target_info.size:
++            raise ValueError("Image is larger than the selected drive.")
++
++        # Confirm the stream is readable before touching the target. For raw
++        # images this is the inexpensive preflight; compressed images were
++        # already decoded end-to-end above and are reopened from the same inode.
++        probe, _probe_size, _probe_compression = _snapshot_image_stream(snapshot)
++        with probe:
++            first_probe = probe.read(CHUNK_SIZE)
++            if not first_probe:
++                raise ValueError("The selected image produced no data.")
++
++        unmount_device(target, progress)
++        # Revalidate after unmount in case the device disappeared/reappeared.
++        target_info = validate_target_device(target, operation_identity)
++        if known_size is not None and known_size > target_info.size:
++            raise ValueError("Image is larger than the selected drive.")
++
++        src, stream_size, compression = _snapshot_image_stream(snapshot)
++        if known_size is None:
++            known_size = stream_size
++
++        progress("stage", name="writing", message=f"Writing {compression} image")
++        hasher = hashlib.sha256()
++        written = 0
+         start = time.monotonic()
+-        with open(target, "rb", buffering=0) as dst:
+-            remaining = written
+-            while remaining:
+-                chunk = dst.read(min(CHUNK_SIZE, remaining))
+-                if not chunk:
+-                    raise OSError("Unexpected end of target while verifying.")
+-                verify_hasher.update(chunk)
+-                checked += len(chunk)
+-                remaining -= len(chunk)
+-                elapsed = max(time.monotonic() - start, 0.001)
+-                progress(
+-                    "progress",
+-                    stage="verifying",
+-                    bytes=checked,
+-                    total=written,
+-                    speed=int(checked / elapsed),
+-                )
+-        if verify_hasher.hexdigest() != digest:
+-            raise RuntimeError("Verification failed: target data does not match the image.")
+-        progress("verified", algorithm="sha256", value=digest)
+ 
++        with src:
++            first = src.read(CHUNK_SIZE)
++            if not first:
++                raise ValueError("The selected image produced no data.")
++            if len(first) > target_info.size:
++                raise ValueError("Decompressed image is larger than the selected drive.")
++
++            # Re-check identity immediately before claiming the whole block device.
++            target_info = validate_target_device(target, operation_identity)
++            flags = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_EXCL", 0)
++            try:
++                fd = os.open(target, flags)
++            except OSError as exc:
++                if getattr(exc, "errno", None) == 16:  # EBUSY
++                    raise RuntimeError(
++                        "The target became busy after unmounting. Close file-manager/terminal access to the USB and try again."
++                    ) from exc
++                raise
++            try:
++                _assert_open_target_matches_path(fd, target, target_info.size)
++                # Remove stale backup GPT/signature data at the physical end before
++                # writing the new image to offset zero.
++                _clear_stale_target_tail(fd, target_info.size)
++
++                pending = first
++                while True:
++                    if written + len(pending) > target_info.size:
++                        raise ValueError("Decompressed image is larger than the selected drive.")
++                    view = memoryview(pending)
++                    while view:
++                        n = os.write(fd, view)
++                        if n <= 0:
++                            raise OSError("Short write to target device.")
++                        view = view[n:]
++                    written += len(pending)
++                    hasher.update(pending)
++                    elapsed = max(time.monotonic() - start, 0.001)
++                    progress(
++                        "progress",
++                        stage="writing",
++                        bytes=written,
++                        total=known_size,
++                        speed=int(written / elapsed),
++                    )
++                    pending = src.read(CHUNK_SIZE)
++                    if not pending:
++                        break
++
++                if known_size is not None and written != known_size:
++                    raise RuntimeError(
++                        f"Image size changed while decoding (expected {known_size} bytes, wrote {written})."
++                    )
