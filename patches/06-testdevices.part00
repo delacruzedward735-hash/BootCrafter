@@ -1,0 +1,44 @@
+diff --git a/tests/test_devices.py b/tests/test_devices.py
+index 90a1550..7ce7283 100644
+--- a/tests/test_devices.py
++++ b/tests/test_devices.py
+@@ -2,7 +2,7 @@ import json
+ import unittest
+ from unittest import mock
+ 
+-from bootcrafter_linux.devices import Device, parse_lsblk, validate_target_device
++from bootcrafter_linux.devices import Device, lsblk_json, parse_lsblk, validate_target_device
+ 
+ 
+ class DeviceTests(unittest.TestCase):
+@@ -41,6 +41,15 @@ class DeviceTests(unittest.TestCase):
+         ]})
+         self.assertEqual([d.path for d in parse_lsblk(payload)], ["/dev/sdc"])
+ 
++    def test_internal_mmc_transport_is_not_listed_without_removable_or_hotplug(self):
++        payload = json.dumps({"blockdevices": [
++            {"path": "/dev/mmcblk0", "type": "disk", "size": 128000000000, "tran": "mmc",
++             "rm": False, "hotplug": False, "ro": False, "model": "Internal eMMC"},
++            {"path": "/dev/mmcblk1", "type": "disk", "size": 64000000000, "tran": "mmc",
++             "rm": True, "hotplug": True, "ro": False, "model": "SD Card"},
++        ]})
++        self.assertEqual([d.path for d in parse_lsblk(payload)], ["/dev/mmcblk1"])
++
+     def test_identity_is_path_bound_for_identical_serialless_drives(self):
+         a = Device("/dev/sdb", 100, "Flash", "Vendor", "usb", True, True, False, False)
+         b = Device("/dev/sdc", 100, "Flash", "Vendor", "usb", True, True, False, False)
+@@ -51,6 +60,14 @@ class DeviceTests(unittest.TestCase):
+         b = Device("/dev/sdb", 101, "Flash", "Vendor", "usb", True, True, False, False, "ABC")
+         self.assertNotEqual(a.identity_token, b.identity_token)
+ 
++    @mock.patch("bootcrafter_linux.devices.subprocess.run")
++    def test_lsblk_uses_trusted_absolute_binary(self, run):
++        run.return_value.stdout = '{"blockdevices":[]}'
++        lsblk_json()
++        argv = run.call_args.args[0]
++        self.assertTrue(argv[0].startswith(("/usr/", "/bin/", "/sbin/")), argv[0])
++        self.assertNotEqual(argv[0], "lsblk")
++
+     @mock.patch("bootcrafter_linux.devices.lsblk_json")
+     def test_validate_target_rejects_identity_mismatch(self, lsblk):
+         lsblk.return_value = json.dumps({"blockdevices": [
