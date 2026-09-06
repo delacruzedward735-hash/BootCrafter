@@ -1,0 +1,85 @@
+nt = require_command("mount")
++        umount = require_command("umount")
++        sync_cmd = require_command("sync")
++        losetup = require_command("losetup")
++
++        # Do NOT use TemporaryDirectory here. Recursive cleanup of a directory
++        # that is unexpectedly still mounted could traverse/delete USB files.
++        # These mountpoints are cleaned with non-recursive rmdir only.
++        temp = tempfile.mkdtemp(prefix="bootcrafter-")
+         iso_mnt = os.path.join(temp, "iso")
+         usb_mnt = os.path.join(temp, "usb")
+-        os.makedirs(iso_mnt)
+-        os.makedirs(usb_mnt)
++        os.mkdir(iso_mnt, 0o700)
++        os.mkdir(usb_mnt, 0o700)
+         iso_mounted = False
+         usb_mounted = False
++        loop_device = ""
+         try:
+-            # Validate the ISO and capacity BEFORE erasing the USB.
++            # Attach the exact inode captured at authorization time. Using
++            # /proc/<helper-pid>/fd/<n> closes the source-path replacement
++            # race while still letting losetup create a normal read-only
++            # loop device for the ISO filesystem.
+             progress("stage", name="validating", message="Validating Windows installer ISO")
+-            _run([mount, "-o", "loop,ro,nosuid,nodev,noexec", source, iso_mnt])
++            loop_device = _run(
++                [losetup, "--find", "--show", "--read-only", snapshot.proc_path]
++            ).strip()
++            if not loop_device.startswith("/dev/loop"):
++                raise RuntimeError("Could not create a read-only loop device for the Windows ISO.")
++            _run([mount, "-o", "ro,nosuid,nodev,noexec", loop_device, iso_mnt])
+             iso_mounted = True
+             scan = validate_windows_source_tree(iso_mnt)
+             required = windows_payload_bytes(scan) + WINDOWS_FREE_SPACE_MARGIN
+@@ -746,7 +1047,7 @@ def make_windows_usb(
+                 )
+ 
+             unmount_device(target, progress)
+-            target_info = validate_target_device(target, expected_identity)
++            target_info = validate_target_device(target, operation_identity)
+             if required > target_info.size:
+                 raise ValueError("The selected USB drive capacity changed. Refresh and select the drive again.")
+ 
+@@ -759,14 +1060,14 @@ def make_windows_usb(
+             # The new partition can briefly expose stale filesystem bytes from
+             # the previous layout. Defeat any automount before formatting it.
+             unmount_device(target, progress)
+-            validate_target_device(target, expected_identity)
++            validate_target_device(target, operation_identity)
+             _run([mkfs, "-F", "32", "-n", sanitize_label(label or "WINDOWS", "fat32"), part])
+ 
+             # A desktop automounter may react to the newly created filesystem.
+             # Unmount once more before attaching it to BootCrafter's private mount.
+             unmount_device(target, progress)
+-            validate_target_device(target, expected_identity)
+-            _run([mount, "-o", "rw,nosuid,nodev", part, usb_mnt])
++            validate_target_device(target, operation_identity)
++            _run([mount, "-o", "rw,nosuid,nodev,noexec", part, usb_mnt])
+             usb_mounted = True
+             _copy_windows_tree(iso_mnt, usb_mnt, progress, scan=scan)
+             progress("stage", name="flushing", message="Flushing Windows installer files")
+@@ -776,10 +1077,18 @@ def make_windows_usb(
+             if _find_case_insensitive(usb_mnt, "sources/boot.wim") is None:
+                 raise RuntimeError("Windows boot.wim verification failed after copy.")
+         finally:
+-            if usb_mounted:
+-                subprocess.run([umount, "--", usb_mnt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+-            if iso_mounted:
+-                subprocess.run([umount, "--", iso_mnt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++            if usb_mounted and not _run_quiet([umount, "--", usb_mnt]):
++                progress("log", message="WARNING: could not unmount BootCrafter's USB mount automatically.")
++            if iso_mounted and not _run_quiet([umount, "--", iso_mnt]):
++                progress("log", message="WARNING: could not unmount the Windows ISO automatically.")
++            if loop_device and not _run_quiet([losetup, "--detach", loop_device]):
++                progress("log", message=f"WARNING: could not detach loop device {loop_device} automatically.")
++            # Non-recursive cleanup is deliberate. If an unmount failed these
++            # calls simply leave harmless empty /tmp mountpoint directories.
++            _rmdir_if_empty(usb_mnt)
++            _rmdir_if_empty(iso_mnt)
++            _rmdir_if_empty(temp)
++
+     _reread_partitions(target)
+     progress("done", partition=partition_path(target), filesystem="fat32", mode="windows-uefi")
+ 
