@@ -1,0 +1,20 @@
+able media;
++- desktop automount/replug behavior on supported target distributions.
++
++Windows mode checks critical copied boot files but does not currently perform a complete byte-for-byte tree verification of every copied file. Raw-mode block-buffer invalidation is best-effort on platforms/tools where the flush operation is available, so the read-back hash is not a laboratory guarantee against every possible controller/cache failure. These are reliability limitations to document, not evidence of a known data-corruption defect.
++
++The current icon includes Linux/penguin-inspired imagery. A public/commercial release should perform its own trademark/branding review; this software audit is not legal clearance.
++
++## Final assessment
++
++**1.0.4: FAIL — do not publish as the production build.**
++
++**1.0.5: PASS for the source/package/software audit, with physical USB acceptance still mandatory before claiming hardware-certified production status.**
++
++## Final release-artifact reproducibility gate
++
++The final source release was cleaned of `dist/`, bytecode caches and coverage artifacts, archived, extracted into a separate temporary directory, and then subjected to the complete verification suite again. The extracted source passed all 32 tests, rebuilt a fresh Debian package, and that package passed `scripts/audit-package.sh`. The rebuilt package's installed payload and Debian control/maintainer scripts were byte-for-byte compared with the release package and matched.
++
++## Repository production gate
++
++For the production repository, the 1.0.5 audited source is paired with CI that runs `scripts/verify.sh`, builds the Debian package, executes `scripts/audit-package.sh`, and publishes a checksum artifact. Website-only files are intentionally excluded from the application-source repository.
