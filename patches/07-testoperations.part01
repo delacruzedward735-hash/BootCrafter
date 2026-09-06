@@ -1,0 +1,84 @@
+ommand_path("lsblk")
++            self.assertIsNotNone(resolved)
++            self.assertNotEqual(resolved, fake)
++            self.assertTrue(resolved.startswith(("/usr/", "/bin/", "/sbin/")))
++
++    def test_emit_broken_pipe_is_nonfatal(self):
++        # A crashed GUI must not abort an in-progress privileged disk write or
++        # leave Python with a broken stdout that changes the helper exit code.
++        import sys
++
++        class BrokenStdout:
++            def write(self, _value):
++                raise BrokenPipeError()
++
++            def flush(self):
++                raise BrokenPipeError()
++
++        original = sys.stdout
++        try:
++            sys.stdout = BrokenStdout()
++            emit("progress", bytes=1, total=2)
++            self.assertIsNot(sys.stdout, original)
++            self.assertFalse(isinstance(sys.stdout, BrokenStdout))
++        finally:
++            try:
++                if sys.stdout is not original and hasattr(sys.stdout, "close"):
++                    sys.stdout.close()
++            finally:
++                sys.stdout = original
++
++    def test_source_snapshot_rejects_file_not_readable_by_invoking_user(self):
++        with tempfile.NamedTemporaryFile(delete=False) as f:
++            f.write(b"secret")
++            path = f.name
++        os.chmod(path, 0o600)
++        try:
++            with mock.patch.dict(os.environ, {"PKEXEC_UID": "65534"}, clear=False):
++                with self.assertRaisesRegex(PermissionError, "not readable by the desktop user"):
++                    open_source_snapshot(path)
++        finally:
++            os.unlink(path)
++
++    @mock.patch("bootcrafter_linux.operations._clear_stale_target_tail")
++    @mock.patch("bootcrafter_linux.operations.unmount_device")
++    @mock.patch("bootcrafter_linux.operations.ensure_source_not_on_target")
++    @mock.patch("bootcrafter_linux.operations._check_block_device")
++    @mock.patch("bootcrafter_linux.operations.require_root")
++    @mock.patch("bootcrafter_linux.operations.validate_target_device")
++    def test_late_corrupt_gzip_fails_before_unmount(
++        self, validate, _root, _block, _guard, unmount, clear_tail
++    ):
++        payload = b"A" * (10 * 1024 * 1024)
++        fd, source_path = tempfile.mkstemp(suffix=".gz")
++        os.close(fd)
++        with gzip.open(source_path, "wb") as f:
++            f.write(payload)
++        # Damage the trailer so the first 8 MiB decodes, but end-to-end CRC
++        # validation fails during the new production preflight.
++        with open(source_path, "r+b") as f:
++            f.seek(-8, os.SEEK_END)
++            trailer = bytearray(f.read(8))
++            trailer[0] ^= 0xFF
++            f.seek(-8, os.SEEK_END)
++            f.write(trailer)
++        with tempfile.NamedTemporaryFile(delete=False) as dst:
++            target_path = dst.name
++            dst.truncate(32 * 1024 * 1024)
++        device = Device(target_path, 32 * 1024 * 1024, "USB", "V", "usb", True, True, False, False, "SER")
++        validate.return_value = device
++        try:
++            with self.assertRaises((gzip.BadGzipFile, OSError)):
++                write_image(
++                    source_path, target_path, expected_identity=device.identity_token,
++                    progress=lambda _event, **_data: None,
++                )
++            unmount.assert_not_called()
++            clear_tail.assert_not_called()
++        finally:
++            os.unlink(source_path)
++            os.unlink(target_path)
++
++
+ if __name__ == "__main__":
+     unittest.main()
