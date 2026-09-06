@@ -1,0 +1,110 @@
+diff --git a/bootcrafter_linux/app.py b/bootcrafter_linux/app.py
+index 54bb614..284dace 100644
+--- a/bootcrafter_linux/app.py
++++ b/bootcrafter_linux/app.py
+@@ -3,7 +3,6 @@ from __future__ import annotations
+ import json
+ import os
+ import queue
+-import shutil
+ import subprocess
+ import sys
+ import threading
+@@ -14,7 +13,7 @@ from tkinter import filedialog, messagebox, ttk
+ 
+ from . import APP_NAME, __version__
+ from .devices import Device, list_devices
+-from .operations import command_path, missing_commands
++from .operations import MBR_MAX_SAFE_BYTES, command_path, missing_commands
+ 
+ BG = "#f5f6f8"
+ SURFACE = "#ffffff"
+@@ -503,25 +502,20 @@ class BootCrafterApp(tk.Tk):
+     def _selected_device(self) -> Device | None:
+         return self.device_by_display.get(self.device_var.get())
+ 
+-    def _helper_path(self) -> list[str]:
++    def _helper_path(self) -> list[str] | None:
+         installed = "/usr/lib/bootcrafter-linux/bootcrafter-helper"
+         if os.path.isfile(installed) and os.access(installed, os.X_OK):
+             return [installed]
+-        project_root = str(Path(__file__).resolve().parent.parent)
+-        env_bin = shutil.which("env") or "/usr/bin/env"
+-        python_bin = sys.executable
+-        return [env_bin, f"PYTHONPATH={project_root}", python_bin, "-m", "bootcrafter_linux.helper"]
++        # Never elevate a helper imported from a user-writable source checkout.
++        # Development/source mode remains useful for UI/hash testing, but real
++        # destructive operations require the root-owned installed package.
++        return None
+ 
+     def _privileged_prefix(self) -> list[str] | None:
+         if os.geteuid() == 0:
+             return []
+-        pkexec = shutil.which("pkexec")
+-        if pkexec:
+-            return [pkexec]
+-        sudo = shutil.which("sudo")
+-        if sudo and sys.stdin.isatty():
+-            return [sudo]
+-        return None
++        pkexec = command_path("pkexec")
++        return [pkexec] if pkexec else None
+ 
+     def _mode_key(self) -> str:
+         mode = self.mode_var.get()
+@@ -547,6 +541,15 @@ class BootCrafterApp(tk.Tk):
+         if device.size < 32 * 1024 * 1024:
+             messagebox.showerror("Invalid target", "The selected drive is too small.")
+             return False
++        if mode_key == "windows" and device.size > MBR_MAX_SAFE_BYTES:
++            messagebox.showerror(
++                "Target too large",
++                "Windows installer mode currently uses an MBR USB layout and supports targets up to 2 TiB.",
++            )
++            return False
++        if mode_key == "format" and self.scheme_var.get().upper() == "MBR" and device.size > MBR_MAX_SAFE_BYTES:
++            messagebox.showerror("Target too large", "Select GPT when formatting a drive larger than 2 TiB.")
++            return False
+         return True
+ 
+     def start_operation(self) -> None:
+@@ -594,10 +597,17 @@ class BootCrafterApp(tk.Tk):
+         if prefix is None:
+             messagebox.showerror(
+                 "Administrator authorization unavailable",
+-                "Install PolicyKit/pkexec, then try again.\n\nDebian/Ubuntu: sudo apt install policykit-1",
++                "Install PolicyKit/pkexec, then try again.\n\nDebian/Ubuntu: sudo apt install pkexec",
+             )
+             return
+         helper = self._helper_path()
++        if helper is None:
++            messagebox.showerror(
++                "Installed helper required",
++                "For security, destructive USB operations are disabled from a source checkout.\n\n"
++                "Build and install the .deb package, then launch BootCrafter normally.",
++            )
++            return
+         identity = device.identity_token
+         if format_only:
+             cmd = prefix + helper + [
+@@ -833,12 +843,19 @@ class BootCrafterApp(tk.Tk):
+             f"{APP_NAME} {__version__}\n\n"
+             "A Linux-native bootable USB creator focused on reliable raw image writing, verification, "
+             "Windows UEFI installer creation, and USB format recovery.\n\n"
+-            "License: GNU GPLv3\n"
++            "License: MIT\n"
+             "Safety: disks used by the running system/live media/swap are blocked and the selected device identity is rechecked before erasing.",
+         )
+ 
+ 
+ def main() -> int:
++    if os.geteuid() == 0:
++        print(
++            "BootCrafter Linux must be launched as a normal desktop user; "
++            "administrator access is requested only for the disk helper.",
++            file=sys.stderr,
++        )
++        return 2
+     app = BootCrafterApp()
+     app.mainloop()
+     return 0
