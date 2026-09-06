@@ -1,0 +1,120 @@
+diff --git a/tests/test_operations.py b/tests/test_operations.py
+index cd83a73..7e447de 100644
+--- a/tests/test_operations.py
++++ b/tests/test_operations.py
+@@ -11,8 +11,13 @@ from unittest import mock
+ from bootcrafter_linux.devices import Device
+ from bootcrafter_linux.operations import (
+     _copy_windows_tree,
++    _rmdir_if_empty,
+     _scan_windows_tree,
++    command_path,
++    emit,
++    open_source_snapshot,
+     format_drive,
++    MBR_MAX_SAFE_BYTES,
+     has_uefi_boot_file,
+     image_stream,
+     partition_path,
+@@ -23,6 +28,7 @@ from bootcrafter_linux.operations import (
+     windows_payload_bytes,
+     write_image,
+     make_windows_usb,
++    _operation_identity,
+ )
+ 
+ 
+@@ -82,6 +88,33 @@ class OperationTests(unittest.TestCase):
+         finally:
+             os.unlink(path)
+ 
++    def test_nonrecursive_cleanup_never_deletes_mounted_style_contents(self):
++        with tempfile.TemporaryDirectory() as root:
++            mountpoint = os.path.join(root, "usb")
++            os.mkdir(mountpoint)
++            sentinel = os.path.join(mountpoint, "keep-me")
++            with open(sentinel, "w", encoding="utf-8") as f:
++                f.write("data")
++            _rmdir_if_empty(mountpoint)
++            self.assertTrue(os.path.isfile(sentinel))
++
++    @mock.patch("bootcrafter_linux.operations.unmount_device")
++    @mock.patch("bootcrafter_linux.operations._check_block_device")
++    @mock.patch("bootcrafter_linux.operations.require_root")
++    @mock.patch("bootcrafter_linux.operations.validate_target_device")
++    def test_mbr_format_over_2tib_rejected_before_unmount(self, validate, _root, _block, unmount):
++        with tempfile.NamedTemporaryFile(delete=False) as target:
++            target_path = target.name
++        validate.return_value = Device(
++            target_path, MBR_MAX_SAFE_BYTES + 1, "Large USB", "V", "usb", True, True, False, False, "S"
++        )
++        try:
++            with self.assertRaisesRegex(ValueError, "2 TiB"):
++                format_drive(target_path, "mbr", "fat32", "TEST")
++            unmount.assert_not_called()
++        finally:
++            os.unlink(target_path)
++
+     @mock.patch("bootcrafter_linux.operations._clear_stale_target_tail")
+     @mock.patch("bootcrafter_linux.operations.unmount_device")
+     @mock.patch("bootcrafter_linux.operations.ensure_source_not_on_target")
+@@ -98,7 +131,10 @@ class OperationTests(unittest.TestCase):
+         validate.return_value = device
+         try:
+             with self.assertRaises((gzip.BadGzipFile, OSError)):
+-                write_image(source_path, target_path, expected_identity=device.identity_token)
++                write_image(
++                    source_path, target_path, expected_identity=device.identity_token,
++                    progress=lambda _event, **_data: None,
++                )
+             clear_tail.assert_not_called()
+         finally:
+             os.unlink(source_path)
+@@ -212,8 +248,10 @@ class OperationTests(unittest.TestCase):
+         validate.return_value = Device(target_path, 96 * 1024 * 1024, "USB", "V", "usb", True, True, False, False, "S")
+         validate_tree.return_value = ([], None, 128 * 1024 * 1024)
+         try:
+-            with self.assertRaisesRegex(ValueError, "too small"):
+-                make_windows_usb(source_path, target_path)
++            _run.side_effect = lambda argv, **_kwargs: "/dev/loop999\n" if "--find" in argv else ""
++            with mock.patch("bootcrafter_linux.operations._run_quiet", return_value=True):
++                with self.assertRaisesRegex(ValueError, "too small"):
++                    make_windows_usb(source_path, target_path, progress=lambda _event, **_data: None)
+             unmount.assert_not_called()
+         finally:
+             os.unlink(source_path)
+@@ -257,13 +295,13 @@ class OperationTests(unittest.TestCase):
+             with self.assertRaisesRegex(ValueError, "larger than 4 GiB"):
+                 _scan_windows_tree(src)
+ 
+-    @mock.patch("bootcrafter_linux.operations.shutil.which")
+-    def test_windows_big_wim_requires_wimlib(self, which):
+-        def fake_which(name):
++    @mock.patch("bootcrafter_linux.operations.command_path")
++    def test_windows_big_wim_requires_wimlib(self, command):
++        def fake_command(name):
+             if name == "wimlib-imagex":
+                 return None
+             return f"/usr/bin/{name}"
+-        which.side_effect = fake_which
++        command.side_effect = fake_command
+         with tempfile.TemporaryDirectory() as src:
+             self._make_windows_tree(src)
+             install = os.path.join(src, "sources", "install.wim")
+@@ -273,5 +311,99 @@ class OperationTests(unittest.TestCase):
+                 validate_windows_source_tree(src)
+ 
+ 
++    def test_operation_identity_locks_to_initial_device_when_token_omitted(self):
++        device = Device("/dev/sdb", 64 * 1024 * 1024, "USB", "Vendor", "usb", True, True, False, False, "SER")
++        self.assertEqual(_operation_identity(device, None), device.identity_token)
++        self.assertEqual(_operation_identity(device, "explicit-token"), "explicit-token")
++
++    def test_command_path_ignores_user_path(self):
++        with tempfile.TemporaryDirectory() as td:
++            fake = os.path.join(td, "lsblk")
++            with open(fake, "w", encoding="utf-8") as f:
++                f.write("#!/bin/sh\nexit 99\n")
++            os.chmod(fake, 0o755)
++            with mock.patch.dict(os.environ, {"PATH": td}):
++                resolved = c
