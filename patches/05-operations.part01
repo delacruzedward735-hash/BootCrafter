@@ -1,0 +1,145 @@
+voking_uid not in (None, 0) and not _source_mode_readable_by_uid(st, invoking_uid):
++            raise PermissionError(
++                "The selected image is not readable by the desktop user. "
++                "BootCrafter will not use administrator privileges to read a protected file."
++            )
++        current = os.stat(source, follow_symlinks=False)
++        if current.st_dev != st.st_dev or current.st_ino != st.st_ino:
++            raise RuntimeError("The selected image changed while it was being opened. Select it again.")
++        return SourceSnapshot(source, fd, int(st.st_size))
++    except Exception:
++        os.close(fd)
++        raise
++
++
+ def required_commands(mode: str, filesystem: str | None = None) -> list[str]:
+     common = ["lsblk", "findmnt", "umount"]
+     if mode == "raw":
+         return common
+     if mode == "windows":
+-        return common + ["wipefs", "sfdisk", "mkfs.vfat", "mount", "sync"]
++        return common + ["wipefs", "sfdisk", "mkfs.vfat", "mount", "sync", "losetup"]
+     if mode == "format":
+         fs_command = {
+             "fat32": "mkfs.vfat",
+@@ -87,6 +213,23 @@ def _run(argv: list[str], *, input_text: str | None = None) -> str:
+     return proc.stdout
+ 
+ 
++def _run_quiet(argv: list[str]) -> bool:
++    """Best-effort cleanup command that must not mask the primary failure."""
++    try:
++        proc = subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
++        return proc.returncode == 0
++    except OSError:
++        return False
++
++
++def _rmdir_if_empty(path: str) -> None:
++    """Remove only an empty directory; never recurse across a mountpoint."""
++    try:
++        os.rmdir(path)
++    except OSError:
++        pass
++
++
+ def _node_for_device(payload: str, device: str) -> dict | None:
+     data = json.loads(payload)
+     target = os.path.realpath(device)
+@@ -125,9 +268,10 @@ def unmount_device(device: str, progress: Progress = emit) -> None:
+ 
+ 
+ class _ZipImageStream:
+-    def __init__(self, archive: zipfile.ZipFile, member: zipfile.ZipExtFile) -> None:
++    def __init__(self, archive: zipfile.ZipFile, member: zipfile.ZipExtFile, backing: BinaryIO | None = None) -> None:
+         self.archive = archive
+         self.member = member
++        self.backing = backing
+ 
+     def read(self, size: int = -1) -> bytes:
+         return self.member.read(size)
+@@ -136,7 +280,11 @@ class _ZipImageStream:
+         try:
+             self.member.close()
+         finally:
+-            self.archive.close()
++            try:
++                self.archive.close()
++            finally:
++                if self.backing is not None:
++                    self.backing.close()
+ 
+     def __enter__(self) -> "_ZipImageStream":
+         return self
+@@ -187,6 +335,96 @@ class _ProcessImageStream:
+                 raise
+ 
+ 
++class _OwnedImageStream:
++    def __init__(self, stream: BinaryIO, backing: BinaryIO) -> None:
++        self.stream = stream
++        self.backing = backing
++
++    def read(self, size: int = -1) -> bytes:
++        return self.stream.read(size)
++
++    def close(self) -> None:
++        try:
++            self.stream.close()
++        finally:
++            if self.backing is not self.stream:
++                self.backing.close()
++
++    def __enter__(self) -> "_OwnedImageStream":
++        return self
++
++    def __exit__(self, exc_type, exc, tb) -> None:
++        self.close()
++
++
++def _snapshot_image_stream(
++    snapshot: SourceSnapshot,
++) -> tuple[BinaryIO | _ZipImageStream | _ProcessImageStream | _OwnedImageStream, int | None, str]:
++    lower = snapshot.path.lower()
++    if lower.endswith(".gz"):
++        backing = snapshot.open_file()
++        return _OwnedImageStream(gzip.GzipFile(fileobj=backing, mode="rb"), backing), None, "gzip"
++    if lower.endswith(".xz"):
++        backing = snapshot.open_file()
++        return _OwnedImageStream(lzma.LZMAFile(backing, mode="rb"), backing), None, "xz"
++    if lower.endswith(".bz2"):
++        backing = snapshot.open_file()
++        return _OwnedImageStream(bz2.BZ2File(backing, mode="rb"), backing), None, "bzip2"
++    if lower.endswith(".zip"):
++        backing = snapshot.open_file()
++        try:
++            archive = zipfile.ZipFile(backing, "r")
++            members = [m for m in archive.infolist() if not m.is_dir()]
++            candidates = [m for m in members if m.filename.lower().endswith(SUPPORTED_ZIP_IMAGE_SUFFIXES)]
++            if len(candidates) != 1:
++                archive.close()
++                backing.close()
++                raise ValueError("ZIP images must contain exactly one ISO/IMG/RAW/BIN file.")
++            member = candidates[0]
++            return _ZipImageStream(archive, archive.open(member, "r"), backing), member.file_size, "zip"
++        except Exception:
++            if not backing.closed:
++                backing.close()
++            raise
++    if lower.endswith((".zst", ".zstd")):
++        zstd = require_command("zstd")
++        backing = snapshot.open_file()
++        stderr_file = tempfile.TemporaryFile(mode="w+b")
++        try:
++            proc = subprocess.Popen([zstd, "-dc"], stdin=backing, stdout=subprocess.PIPE, stderr=stderr_file)
++        except Exception:
++            backing.close()
++            stderr_file.close()
++            raise
++        backing.close()
++        return _ProcessImageStream(proc, stderr_file), None, "zstd"
++    return snapshot.open_file(), snapshot.size, "raw"
++
++
++def _preflight_compressed_snapshot(
++    snapshot: S
