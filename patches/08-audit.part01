@@ -1,0 +1,92 @@
+the current working directory from `sys.path`. An audit fixture placed a malicious `argparse.py` in an attacker-writable current directory and reproduced its execution during helper import. After PolicyKit authorization this would have been a root-code-execution boundary failure.
++
++**1.0.5 fix:** installed GUI and helper wrappers use `/usr/bin/python3 -I -S` with an explicit root-owned `/usr/lib/bootcrafter-linux` import path. `-I` removes the current directory/user site and ignores Python environment variables; `-S` prevents implicit `site` processing. The package audit now executes a malicious-current-directory regression and fails if that module is imported.
++
++### 2. Debian package depended on legacy/transitional `policykit-1` — FIXED
++
++The 1.0.4 control file required `policykit-1`. Modern Debian/Ubuntu packaging exposes `pkexec` separately, and the old name is transitional or absent depending on distribution release.
++
++**1.0.5 fix:** the Debian package depends directly on `pkexec`. The package audit rejects any reintroduction of `policykit-1`.
++
++## Additional hardening fixed in 1.0.5
++
++### 3. Helper calls without a GUI identity token were weaker than GUI-started operations — FIXED
++
++The helper parser allowed `--identity` to be omitted. Previously, later stage validations could therefore lack the exact initial token.
++
++**Fix:** each destructive operation captures an identity token from the first validated target when no external token is supplied, then uses that operation-local identity for every subsequent revalidation.
++
++### 4. Raw verification reopened the target by path without binding the read FD to the same device — FIXED
++
++After writing, verification reopened the target path. A pathological device-path replacement between stages could make the verifier read a different device.
++
++**Fix:** 1.0.5 revalidates after the write, opens the verification target, verifies the opened file descriptor's block-device identity/capacity against the selected target, hashes exactly the written length, and revalidates before final partition-table reread.
++
++### 5. Internal eMMC could be listed based only on transport metadata — FIXED
++
++Transport `mmc`/`sdio` alone is no longer treated as evidence that a disk is an external destructive target. A device must be removable, hotplug, or USB to be offered by normal discovery.
++
++### 6. Root GUI bypass and maintainer-script PATH hardening — FIXED
++
++The hidden environment bypass for direct root GUI startup was removed. Debian `postinst`/`postrm` scripts set a fixed system `PATH` before command lookup.
++
++## Previously retained production safeguards
++
++1.0.5 retains the 1.0.4 hardening for:
++
++- explicit destructive-target selection with no silent auto-switch;
++- system/live/swap/read-only and mounted-system-disk protection;
++- source-image-on-target rejection;
++- stable source-image inode snapshots with invoking-user readability enforcement;
++- trusted absolute/system command resolution for privileged operations;
++- complete compressed-image decode/integrity preflight before target erase;
++- exclusive raw block-device open, capacity checks, short-write handling, `fsync`, and best-effort block-buffer flush;
++- stale backup-GPT/end-of-disk cleanup before raw writing;
++- SHA-256 write-time digest and optional read-back comparison;
++- Windows ISO validation and capacity checks before erase;
++- read-only loop-backed Windows ISO source mount with `nosuid,nodev,noexec`;
++- non-recursive temporary mount cleanup;
++- formatter dependency preflight before format-mode erase;
++- conservative MBR >2 TiB rejection;
++- helper continuation if the GUI/progress pipe disappears mid-operation.
++
++## Automated validation
++
++**32 / 32 backend/security tests pass.**
++
++The release verification also checks:
++
++- Python compilation/import/version;
++- raw image write + digest/read-back regression;
++- compressed-image early and late corruption preflight;
++- target capacity and device-replacement regressions;
++- explicit target/no-auto-switch behavior;
++- system/live/swap protection;
++- direct-helper operation identity fallback;
++- internal non-removable eMMC exclusion;
++- Windows ISO validation/capacity/split-WIM paths;
++- format dependency/partition-type/MBR-size behavior;
++- root GUI refusal and GUI small-window action visibility;
++- PolicyKit XML action path;
++- trusted command lookup and dangerous dynamic-execution static scans.
++
++`scripts/audit-package.sh` independently extracts the final `.deb` and validates:
++
++- package name/version/dependencies;
++- absence of `policykit-1`;
++- no world-writable/setuid/setgid payload paths;
++- shell syntax of installed wrappers and maintainer scripts;
++- `python3 -I -S` in both installed Python wrappers;
++- malicious-current-directory import-hijack resistance;
++- installed-layout package import/version;
++- PolicyKit action path.
++
++An installed-layout Xvfb GUI smoke test was also performed with isolated Python.
++
++## Remaining limitations / acceptance requirements
++
++This audit environment does not expose a disposable physical USB block device. Therefore the release is **not hardware-certified** here. Before broad public distribution, record successful physical tests for every advertised workflow, including:
++
++- Linux/Proxmox hybrid ISO → physical USB → BootCrafter verification → successful UEFI boot;
++- Windows 10/11 UEFI ISO → physical USB → successful Windows Setup startup;
++- each advertised format mode on dispos
