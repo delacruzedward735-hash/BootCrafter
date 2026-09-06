@@ -1,0 +1,166 @@
+diff --git a/bootcrafter_linux/operations.py b/bootcrafter_linux/operations.py
+index 09c75f0..c2c3869 100644
+--- a/bootcrafter_linux/operations.py
++++ b/bootcrafter_linux/operations.py
+@@ -6,12 +6,15 @@ import hashlib
+ import json
+ import lzma
+ import os
+-import shutil
++import pwd
++import grp
+ import stat
+ import subprocess
++import sys
+ import tempfile
+ import time
+ import zipfile
++from dataclasses import dataclass
+ from pathlib import Path
+ from typing import BinaryIO, Callable
+ 
+@@ -21,11 +24,29 @@ CHUNK_SIZE = 8 * 1024 * 1024
+ Progress = Callable[..., None]
+ SUPPORTED_ZIP_IMAGE_SUFFIXES = (".iso", ".img", ".raw", ".bin")
+ STALE_TAIL_CLEAR_BYTES = 4 * 1024 * 1024
+-WINDOWS_FREE_SPACE_MARGIN = 64 * 1024 * 1024
++WINDOWS_FREE_SPACE_MARGIN = 128 * 1024 * 1024
++MBR_MAX_SAFE_BYTES = 2 * 1024 ** 4
++TRUSTED_COMMAND_DIRS = ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
+ 
+ 
+ def emit(event: str, **data) -> None:
+-    print(json.dumps({"event": event, **data}, separators=(",", ":")), flush=True)
++    """Emit helper progress without making UI-pipe failure destructive.
++
++    The privileged helper must keep completing a disk write even if the GUI is
++    killed, the desktop session crashes, or the stdout pipe disappears.
++    """
++    try:
++        print(json.dumps({"event": event, **data}, separators=(",", ":")), flush=True)
++    except (BrokenPipeError, OSError):
++        # Progress reporting is best-effort; disk integrity is not. Replace the
++        # broken stream so Python does not fail again while flushing stdout at
++        # interpreter shutdown (which would otherwise turn a successful write
++        # into a non-zero helper exit status).
++        try:
++            sys.stdout = open(os.devnull, "w")
++        except OSError:
++            pass
++        return
+ 
+ 
+ def require_root() -> None:
+@@ -34,11 +55,15 @@ def require_root() -> None:
+ 
+ 
+ def command_path(name: str) -> str | None:
+-    """Find system tools even when a desktop session has a minimal PATH."""
+-    path = shutil.which(name)
+-    if path:
+-        return path
+-    for directory in ("/usr/sbin", "/usr/bin", "/sbin", "/bin"):
++    """Resolve privileged helpers only from trusted system directories.
++
++    Never honor a desktop/user PATH here: this module also runs as root via
++    pkexec, so PATH lookup would turn a user-writable executable into a
++    privilege-escalation surface.
++    """
++    if not name or "/" in name:
++        return None
++    for directory in TRUSTED_COMMAND_DIRS:
+         candidate = os.path.join(directory, name)
+         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+             return candidate
+@@ -52,12 +77,113 @@ def require_command(name: str) -> str:
+     return path
+ 
+ 
++def _invoking_uid() -> int | None:
++    """Return the desktop user's uid when the helper was elevated."""
++    for key in ("PKEXEC_UID", "SUDO_UID"):
++        raw = os.environ.get(key, "").strip()
++        if raw.isdigit():
++            uid = int(raw)
++            if uid >= 0:
++                return uid
++    return None
++
++
++def _uid_groups(uid: int) -> set[int]:
++    try:
++        entry = pwd.getpwuid(uid)
++    except KeyError:
++        return set()
++    groups = {entry.pw_gid}
++    try:
++        groups.update(os.getgrouplist(entry.pw_name, entry.pw_gid))
++    except (AttributeError, OSError):
++        for record in grp.getgrall():
++            if entry.pw_name in record.gr_mem:
++                groups.add(record.gr_gid)
++    return groups
++
++
++def _source_mode_readable_by_uid(st: os.stat_result, uid: int) -> bool:
++    if uid == 0:
++        return True
++    mode = st.st_mode
++    if st.st_uid == uid:
++        return bool(mode & stat.S_IRUSR)
++    if st.st_gid in _uid_groups(uid):
++        return bool(mode & stat.S_IRGRP)
++    return bool(mode & stat.S_IROTH)
++
++
++@dataclass
++class SourceSnapshot:
++    """Stable open source image used by the privileged helper.
++
++    Keeping the inode open prevents a user-writable source path from being
++    swapped to another file after authorization but before the destructive
++    operation starts.
++    """
++
++    path: str
++    fd: int
++    size: int
++
++    @property
++    def proc_path(self) -> str:
++        return f"/proc/{os.getpid()}/fd/{self.fd}"
++
++    def open_file(self) -> BinaryIO:
++        # Opening our proc fd creates a fresh file description with its own
++        # offset while still referring to the exact inode captured above.
++        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
++        dup_fd = os.open(self.proc_path, flags)
++        return os.fdopen(dup_fd, "rb", buffering=0)
++
++    def close(self) -> None:
++        if self.fd >= 0:
++            os.close(self.fd)
++            self.fd = -1
++
++    def __enter__(self) -> "SourceSnapshot":
++        return self
++
++    def __exit__(self, exc_type, exc, tb) -> None:
++        self.close()
++
++
++def open_source_snapshot(path: str) -> SourceSnapshot:
++    source = os.path.realpath(path)
++    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
++    try:
++        fd = os.open(source, flags)
++    except OSError as exc:
++        raise PermissionError(f"Cannot open selected image safely: {source}") from exc
++    try:
++        st = os.fstat(fd)
++        if not stat.S_ISREG(st.st_mode):
++            raise ValueError("The selected image must be a regular file.")
++        if st.st_size <= 0:
++            raise ValueError("The selected image file is empty.")
++        invoking_uid = _invoking_uid()
++        if in
